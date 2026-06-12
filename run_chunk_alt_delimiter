@@ -1,32 +1,55 @@
 import os, glob, logging
 logging.getLogger("sqlglot").setLevel(logging.ERROR)
 import sql_delimiter_wtry as T          # must be the UPDATED file content
+
 SRC_DIR       = "extracted_files_all"
-CLEAN_DIR     = "delimited_clean_2"
+CLEAN_DIR     = "delimited_clean"
 REVIEW_DIR    = "review"
 DIALECT       = "tsql"
 MARKER        = "[AUTOMATED DELIMITER]"
 TERMINATE_ALL = True
-N             = None
+
+# --- the two knobs ---
+SEND_ALL_TO_CLEAN = True    # True: every file -> CLEAN_DIR, no review routing
+CONSERVATIVE      = False   # False: write EVERY detected delimiter (nothing withheld)
+N                 = None
+
 os.makedirs(CLEAN_DIR, exist_ok=True)
 os.makedirs(REVIEW_DIR, exist_ok=True)
 files = sorted(glob.glob(os.path.join(SRC_DIR, "*.sql")))[:N]
-print(len(files), "files to process")
+print(len(files), "files to process |",
+      "ALL->CLEAN" if SEND_ALL_TO_CLEAN else "routed",
+      "| conservative" if CONSERVATIVE else "| apply-all")
+
 summary = []
 for i, path in enumerate(files, 1):
     sql = open(path, encoding="utf-8", errors="replace").read()
-    ins, _ = T.annotate(sql, DIALECT, terminate_all=TERMINATE_ALL, conservative=True)
+    ins, _ = T.annotate(sql, DIALECT, terminate_all=TERMINATE_ALL, conservative=CONSERVATIVE)
     pre    = T.review(sql, ins, verbose=False)
-    flags  = T.flagged_cuts(ins, sql, verbose=False)     # uncorroborated low-confidence spots
-    fixed  = T.apply(sql, ins, annotate_marker=True, marker=MARKER)   # skips flagged automatically
+    flags  = T.flagged_cuts(ins, sql, verbose=False)
+    fixed  = T.apply(sql, ins, annotate_marker=True, marker=MARKER)
     mid    = T.check_midline_cut(fixed, marker=MARKER, verbose=False)
+
     needs_review = bool(pre) or bool(flags) or bool(mid)
-    dest = REVIEW_DIR if needs_review else CLEAN_DIR
+    if SEND_ALL_TO_CLEAN:
+        dest = CLEAN_DIR                      # force everything to clean
+    else:
+        dest = REVIEW_DIR if needs_review else CLEAN_DIR
+
     out_path = os.path.join(dest, os.path.basename(path))
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         f.write(fixed)
-    summary.append((os.path.basename(path), len(ins), len(pre), needs_review))
-    flag = "REVIEW" if needs_review else "ok"
-    print(f"[{i}/{len(files)}] {flag:6s}  +{len(ins):3d} delims  pre={len(pre)}  -> {out_path}")
-n_review = sum(1 for *_ , r in summary if r)
-print(f"\nDone. {len(summary)-n_review} clean, {n_review} need review (in '{REVIEW_DIR}/').")
+
+    n_applied = sum(1 for x in ins if not x.flagged)
+    summary.append((os.path.basename(path), n_applied, needs_review))
+    note = "" if SEND_ALL_TO_CLEAN else ("REVIEW" if needs_review else "ok")
+    print(f"[{i}/{len(files)}] {note:6s}  +{n_applied:3d} delims  "
+          f"flagged={len(flags)} pre={len(pre)} mid={len(mid)}  -> {out_path}")
+
+if SEND_ALL_TO_CLEAN:
+    n_flagged = sum(1 for _, _, r in summary if r)
+    print(f"\nDone. All {len(summary)} files written to '{CLEAN_DIR}/'. "
+          f"{n_flagged} would have gone to review under routing.")
+else:
+    n_review = sum(1 for _, _, r in summary if r)
+    print(f"\nDone. {len(summary)-n_review} clean, {n_review} need review.")
